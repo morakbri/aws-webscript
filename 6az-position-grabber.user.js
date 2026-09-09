@@ -3,6 +3,8 @@
 // @name         6az Position Grabber
 // @namespace    https://amazon.sharepoint.com/
 // @version      2.8.3
+// @updateURL    https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
+// @downloadURL  https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
 // @description  Auto-extracts rack positions from the Excel file you're currently viewing for 6az — filters by AZ column, pastes values only, trusts sheet formatting. Groups by site with 2-row gaps.
 // @author       @morakbri @tngujona
 // @match        https://*.sharepoint.com/*
