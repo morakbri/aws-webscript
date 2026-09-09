@@ -17,7 +17,8 @@ Tampermonkey userscript that auto-extracts rack positions from the weekly ShareP
 1. Install [Tampermonkey](https://www.tampermonkey.net/) browser extension
 2. Click the link below — Tampermonkey will prompt you to install:
 
-   👉 **[Install 6az Position Grabber](https://raw.githubusercontent.com/YOUR_USERNAME/6az-position-grabber/main/6az-position-grabber.user.js)**
+   👉 **[Install 6az Position Grabber]👉 **[Install 6az Position Grabber](https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js)**
+
 
 3. That's it — updates are automatic
 
