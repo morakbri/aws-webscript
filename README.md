@@ -34,6 +34,7 @@ Tampermonkey userscript that auto-extracts rack positions from the weekly ShareP
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.8.4 | 2026-09-10 | Added metronome TRUE/FALSE detection
 | 2.8.3 | 2026-09-09 | Fixed GUID extraction bug; added WOPI fetch strategy |
 | 2.8.2 | 2026-09-08 | Added HTML response guard; multi-strategy auth-resilient fetch |
 | 2.8.0 | 2026-09-07 | Initial multi-strategy fetch with auth headers |
