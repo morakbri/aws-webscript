@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name         6az Position Grabber
 // @namespace    https://amazon.sharepoint.com/
-// @version      2.8.3
+// @version      2.8.4
 // @updateURL    https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
 // @downloadURL  https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
 // @description  Auto-extracts rack positions from the Excel file you're currently viewing for 6az — filters by AZ column, pastes values only, trusts sheet formatting. Groups by site with 2-row gaps.
@@ -32,7 +32,7 @@
         brickHandoffDate:'', dateWorkloadReceived:'',
         copper:'Not Installed', copperSignature:'Tech Alias',
         fiber:'Not Installed', fiberSignature:'Tech Alias',
-        metronome:'FALSE', mnSignature:'Tech Alias',
+        mnSignature:'Tech Alias',
         optics:'Check for Optics', brickPatching:'Tech Alias',
         sitePOC:'', positionStatus:''
     };
@@ -98,7 +98,7 @@
     overlay.id = 'az6-popup-overlay';
     overlay.innerHTML = `<div id="az6-popup">
         <div class="az6-header-row"><div><h2>6az Position Grabber</h2>
-        <div class="az6-subtitle">Auto-extract rack positions — grouped by site, 2-row gaps — values only — v2.8.3</div></div>
+        <div class="az6-subtitle">Auto-extract rack positions — grouped by site, 2-row gaps — values only — v2.8.4</div></div>
         <button class="az6-btn az6-btn-close" id="az6-close-btn">Close</button></div>
         <div id="az6-file-info" style="display:none"><div class="az6-file-icon">📊</div>
         <div class="az6-file-details"><div class="az6-file-name" id="az6-detected-name">—</div>
@@ -175,8 +175,6 @@
     }
 
     // === v2.8.3 SAFE GUID EXTRACTION ===
-    // Old regex replace(/7B/gi,'') destroyed GUIDs containing hex "7b" as data.
-    // e.g. 69d7b67e → 69d67e (broken!). Now we URL-decode first, then strip only literal braces.
     function cleanSourceDocGuid(raw) {
         if (!raw) return '';
         let s = raw;
@@ -358,9 +356,11 @@
                 if(!az||!pos) return; if(!isTarget6az(az)){skipAz++;return;}
                 const rt=String(row[colMap.rackType]||'').trim(); if(rt&&!isValidRackType(rt)){skipRt++;return;}
                 const notes=String(row[colMap.notes]||'').trim(), nl=notes.toLowerCase();
+                const metroVal = colMap.metronomeLength ? String(row[colMap.metronomeLength]||'').trim() : '';
                 const entry={site,position:pos,uplinkConfig:String(row[colMap.uplinkConfig]||'').trim(),
                     asset:String(row[colMap.asset]||'').trim(),rackType:rt,landDate:formatDate(row[colMap.landDate]),
-                    brick:String(row[colMap.brick]||'').trim(),notes};
+                    brick:String(row[colMap.brick]||'').trim(),notes,
+                    metronome: metroVal !== '' ? 'TRUE' : 'FALSE'};
                 if(ALERT_LOST_RES.some(t=>nl.includes(t))){entry.status='lost';lostRes.push(entry);grabbed.push(entry);return;}
                 if(ALERT_REJECTED.some(t=>nl.includes(t))){entry.status='rejected';rejPos.push(entry);grabbed.push(entry);return;}
                 entry.status='ok'; grabbed.push(entry);
@@ -370,13 +370,14 @@
         }catch(err){setStatus('Error processing: '+err.message,'error');}
     }
     function findColumns(headers){
-        const m={az:null,site:null,position:null,uplinkConfig:null,asset:null,rackType:null,landDate:null,brick:null,notes:null};
+        const m={az:null,site:null,position:null,uplinkConfig:null,asset:null,rackType:null,landDate:null,brick:null,notes:null,metronomeLength:null};
         headers.forEach(h=>{ const l=h.toLowerCase().trim();
             if(l==='az'&&!m.az) m.az=h; else if(l==='site'&&!m.site) m.site=h;
             else if(l==='position'&&!m.position) m.position=h; else if(l.includes('uplink')&&!m.uplinkConfig) m.uplinkConfig=h;
             else if(l==='asset'&&!m.asset) m.asset=h; else if((l==='rack type'||l==='racktype')&&!m.rackType) m.rackType=h;
             else if((l.includes('rack land')||l==='land date'||l.includes('scheduled land'))&&!m.landDate) m.landDate=h;
             else if(l==='brick'&&!m.brick) m.brick=h; else if((l==='notes'||l==='note')&&!m.notes) m.notes=h;
+            else if((l==='metronome length'||l==='metronome_length'||l==='metro length'||l==='metronome')&&!m.metronomeLength) m.metronomeLength=h;
         }); return m;
     }
     function formatDate(val){
@@ -390,7 +391,7 @@
         const d=DESTINATION_DEFAULTS;
         return [e.site,e.position,e.uplinkConfig,e.asset,e.rackType,e.landDate,e.brick,
             d.brickHandoffDate,d.dateWorkloadReceived,d.copper,d.copperSignature,d.fiber,d.fiberSignature,
-            d.metronome,d.mnSignature,d.optics,d.brickPatching,d.sitePOC,d.positionStatus].join('\t');
+            e.metronome,d.mnSignature,d.optics,d.brickPatching,d.sitePOC,d.positionStatus].join('\t');
     }
     function buildEmptyRowTSV(){ return new Array(19).fill('').join('\t'); }
     function buildOpticsRowTSV(e){ return [e.site,e.position,e.uplinkConfig,e.asset,e.brick,e.landDate].join('\t'); }
