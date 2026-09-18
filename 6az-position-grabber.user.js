@@ -2,10 +2,10 @@
 // ==UserScript==
 // @name         6az Position Grabber
 // @namespace    https://amazon.sharepoint.com/
-// @version      2.8.4
+// @version      2.9.0
 // @updateURL    https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
 // @downloadURL  https://github.com/morakbri/aws-webscript/raw/refs/heads/main/6az-position-grabber.user.js
-// @description  Auto-extracts rack positions from the Excel file you're currently viewing for 6az — filters by AZ column, pastes values only, trusts sheet formatting. Groups by site with 2-row gaps.
+// @description  Auto-extracts rack positions from the Excel file you're currently viewing for 6az — filters by AZ column, pastes values only, trusts sheet formatting. Groups by site with 2-row gaps. Midday (blue/green) rows included in optics only, excluded from cabling.
 // @author       @morakbri @tngujona
 // @match        https://*.sharepoint.com/*
 // @match        https://amazon.sharepoint.com/*
@@ -36,6 +36,83 @@
         optics:'Check for Optics', brickPatching:'Tech Alias',
         sitePOC:'', positionStatus:''
     };
+
+    // =========================================================================
+    // MIDDAY FILL DETECTION — Prep team marks midday deliveries with blue or
+    // green fill.  Both are optics-only (excluded from cabling copy).
+    // =========================================================================
+
+    // --- Blue detection (theme + indexed + RGB) ---
+    const BLUE_THEME_INDICES = [4, 5, 8, 9];
+    const BLUE_INDEXED_PALETTE = [5,12,23,28,30,32,33,39,40,41,44,48,49,54,55,56,62];
+
+    function isBlueRGB(rgb) {
+        if (!rgb || typeof rgb !== 'string') return false;
+        const hex = rgb.replace(/^#/, '').replace(/^FF/i, '').padStart(6, '0');
+        if (hex.length < 6) return false;
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        return b > 140 && b > r * 1.4 && b > g * 1.3 && (r < 180 || g < 180);
+    }
+
+    // --- Green detection (RGB) ---
+    const GREEN_DETECT = { gMin: 140, rMaxRatio: 1.0, bMaxRatio: 1.0 };
+
+    function isGreenRGB(rgb) {
+        if (!rgb || typeof rgb !== 'string') return false;
+        let hex = rgb.replace(/^#/, '');
+        if (hex.length === 8) hex = hex.substring(2); // strip alpha prefix (AARRGGBB)
+        if (hex.length !== 6) return false;
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        return g >= GREEN_DETECT.gMin && g > r * GREEN_DETECT.rMaxRatio && g > b * GREEN_DETECT.bMaxRatio;
+    }
+
+    // --- Unified cell color check — returns 'blue', 'green', or null ---
+    function getCellMiddayColor(cell) {
+        if (!cell || !cell.s) return null;
+        const s = cell.s;
+        const colorSources = [];
+        if (s.fill) {
+            if (s.fill.fgColor) colorSources.push(s.fill.fgColor);
+            if (s.fill.bgColor) colorSources.push(s.fill.bgColor);
+        }
+        if (s.patternFill) {
+            if (s.patternFill.fgColor) colorSources.push(s.patternFill.fgColor);
+            if (s.patternFill.bgColor) colorSources.push(s.patternFill.bgColor);
+        }
+        if (s.fgColor) colorSources.push(s.fgColor);
+        if (s.bgColor) colorSources.push(s.bgColor);
+
+        for (const c of colorSources) {
+            // Check blue first (RGB → theme → indexed)
+            if (c.rgb && isBlueRGB(c.rgb)) return 'blue';
+            if (c.theme !== undefined && c.theme !== null) {
+                const t = Number(c.theme);
+                if (BLUE_THEME_INDICES.includes(t)) return 'blue';
+            }
+            if (c.indexed !== undefined && c.indexed !== null) {
+                const idx = Number(c.indexed);
+                if (BLUE_INDEXED_PALETTE.includes(idx)) return 'blue';
+            }
+            // Check green (RGB only)
+            if (c.rgb && isGreenRGB(c.rgb)) return 'green';
+        }
+        return null;
+    }
+
+    // --- Row-level detection — scans first 10 cols, returns 'blue'|'green'|null ---
+    function detectRowMidday(sheet, rowIndex, colCount) {
+        for (let c = 0; c < Math.min(colCount, 10); c++) {
+            const addr = XLSX.utils.encode_cell({ r: rowIndex, c: c });
+            const cell = sheet[addr];
+            const color = getCellMiddayColor(cell);
+            if (color) return color;
+        }
+        return null;
+    }
 
     // === STYLES ===
     const styles = document.createElement('style');
@@ -68,6 +145,7 @@
 .az6-alert-banner{border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;display:none}
 .az6-alert-lost{background:#78350f;border:1px solid #d97706;color:#fde68a}
 .az6-alert-rejected{background:#7f1d1d;border:1px solid #dc2626;color:#fca5a5}
+.az6-alert-midday{background:#064e3b;border:1px solid #059669;color:#6ee7b7}
 .az6-alert-banner strong{display:block;margin-bottom:4px;font-size:14px}
 .az6-alert-banner ul{margin:4px 0 0 16px;padding:0}.az6-alert-banner li{margin:2px 0}
 #az6-results-table{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px}
@@ -76,7 +154,14 @@
 #az6-results-table tr:hover td{background:#1f2937}
 #az6-results-table tr.az6-row-lost td{background:#422006;color:#fde68a}
 #az6-results-table tr.az6-row-rejected td{background:#450a0a;color:#fca5a5;text-decoration:line-through}
+#az6-results-table tr.az6-row-midday-blue td{background:#0c1a3d;color:#93c5fd}
+#az6-results-table tr.az6-row-midday-blue:hover td{background:#172554}
+#az6-results-table tr.az6-row-midday-green td{background:#052e16;color:#86efac}
+#az6-results-table tr.az6-row-midday-green:hover td{background:#064e3b}
 #az6-results-table tr.az6-site-divider td{background:#0f172a;padding:2px;border-bottom:2px solid #374151}
+.az6-tag-midday{display:inline-block;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle;color:#fff}
+.az6-tag-midday-blue{background:#2563eb}
+.az6-tag-midday-green{background:#059669}
 #az6-table-container{max-height:300px;overflow-y:auto;border:1px solid #374151;border-radius:6px;margin-bottom:16px;display:none}
 #az6-output-box{background:#064e3b;border:1px solid #065f46;border-radius:6px;padding:12px;font-family:'Consolas','Monaco',monospace;font-size:12px;color:#6ee7b7;white-space:pre;overflow-x:auto;max-height:180px;overflow-y:auto;margin-bottom:12px;display:none}
 #az6-copy-row{display:none;gap:12px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
@@ -98,7 +183,7 @@
     overlay.id = 'az6-popup-overlay';
     overlay.innerHTML = `<div id="az6-popup">
         <div class="az6-header-row"><div><h2>6az Position Grabber</h2>
-        <div class="az6-subtitle">Auto-extract rack positions — grouped by site, 2-row gaps — values only — v2.8.4</div></div>
+        <div class="az6-subtitle">Auto-extract rack positions — grouped by site, 2-row gaps — values only — v2.9.0 (midday-aware: blue + green)</div></div>
         <button class="az6-btn az6-btn-close" id="az6-close-btn">Close</button></div>
         <div id="az6-file-info" style="display:none"><div class="az6-file-icon">📊</div>
         <div class="az6-file-details"><div class="az6-file-name" id="az6-detected-name">—</div>
@@ -107,6 +192,7 @@
         <div class="az6-controls"><select id="az6-sheet-select" disabled><option value="">-- Select Sheet --</option></select>
         <button class="az6-btn az6-btn-primary" id="az6-grab-btn" disabled>Grab 6az Positions</button></div>
         <div id="az6-status"></div>
+        <div class="az6-alert-banner az6-alert-midday" id="az6-alert-midday"><strong>🟢🔵 MIDDAY POSITIONS DETECTED</strong><div id="az6-midday-info"></div></div>
         <div class="az6-alert-banner az6-alert-lost" id="az6-alert-lost"><strong>⚠️ LOST RESERVATIONS — Need to Re-Reserve!</strong><ul id="az6-lost-list"></ul></div>
         <div class="az6-alert-banner az6-alert-rejected" id="az6-alert-rejected"><strong>🚫 REJECTED POSITIONS</strong><ul id="az6-rejected-list"></ul></div>
         <div id="az6-stats"></div>
@@ -114,13 +200,13 @@
         <th>Site</th><th>Position</th><th>Uplink Config</th><th>Asset</th><th>Rack Type</th><th>Rack Land Date</th><th>Brick</th><th>Notes</th>
         </tr></thead><tbody id="az6-results-body"></tbody></table></div>
         <div id="az6-output-box"></div>
-        <div id="az6-copy-row"><button class="az6-btn az6-btn-success" id="az6-copy-btn">📋 Copy (Clean)</button>
-        <button class="az6-btn az6-btn-primary" id="az6-copy-all-btn">📋 Copy (With Alerts)</button>
+        <div id="az6-copy-row"><button class="az6-btn az6-btn-success" id="az6-copy-btn">📋 Copy Cabling (Clean)</button>
+        <button class="az6-btn az6-btn-primary" id="az6-copy-all-btn">📋 Copy Cabling (With Alerts)</button>
         <span id="az6-copy-status" style="font-size:12px;color:#34d399"></span>
-        <div class="az6-copy-hint">Paste into row below header (Col A). Grouped by site with 2-row gaps. Values only — sheet formatting applies automatically. Cols T/U/V untouched.</div></div>
-        <div id="az6-optics-copy-row"><button class="az6-btn az6-btn-optics" id="az6-copy-optics-btn">🔬 Copy Optics (Clean)</button>
+        <div class="az6-copy-hint">Cabling only — midday (blue/green) rows excluded. Paste into row below header (Col A). Grouped by site with 2-row gaps.</div></div>
+        <div id="az6-optics-copy-row"><button class="az6-btn az6-btn-optics" id="az6-copy-optics-btn">🔬 Copy Optics (All)</button>
         <span id="az6-optics-copy-status" style="font-size:12px;color:#7dd3fc"></span>
-        <div class="az6-optics-hint">6-col optics TSV (Site · Position · Uplink Config · Asset · Brick · Land Date). Paste into Col A of the optics workload. Blank row between sites.</div></div>
+        <div class="az6-optics-hint">Optics includes morning + midday (blue/green) positions. 6-col TSV (Site · Position · Uplink Config · Asset · Brick · Land Date). Paste into Col A of the optics workload. Blank row between sites.</div></div>
     </div>`;
     document.body.appendChild(overlay);
 
@@ -131,6 +217,7 @@
         statusEl=document.getElementById('az6-status'), statsEl=document.getElementById('az6-stats'),
         alertLostEl=document.getElementById('az6-alert-lost'), lostListEl=document.getElementById('az6-lost-list'),
         alertRejectedEl=document.getElementById('az6-alert-rejected'), rejectedListEl=document.getElementById('az6-rejected-list'),
+        alertMiddayEl=document.getElementById('az6-alert-midday'), middayInfoEl=document.getElementById('az6-midday-info'),
         tableContainer=document.getElementById('az6-table-container'), resultsBody=document.getElementById('az6-results-body'),
         outputBox=document.getElementById('az6-output-box'), copyRow=document.getElementById('az6-copy-row'),
         copyBtn=document.getElementById('az6-copy-btn'), copyAllBtn=document.getElementById('az6-copy-all-btn'),
@@ -174,7 +261,7 @@
         return groups;
     }
 
-    // === v2.8.3 SAFE GUID EXTRACTION ===
+    // === SAFE GUID EXTRACTION ===
     function cleanSourceDocGuid(raw) {
         if (!raw) return '';
         let s = raw;
@@ -322,7 +409,8 @@
         setStatus('Fetching: '+fileName+'...','info');
         try{
             const data=await fetchExcelFile(detected);
-            workbook=XLSX.read(data,{type:'array'});
+            // v2.9.0: cellStyles:true to read fill colors for midday detection
+            workbook=XLSX.read(data,{type:'array',cellStyles:true});
             sheetSelect.innerHTML='<option value="">-- Select Sheet --</option>';
             workbook.SheetNames.forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sheetSelect.appendChild(o); });
             sheetSelect.disabled=false; grabBtn.disabled=false;
@@ -335,7 +423,8 @@
     function resetResults(){
         resultsBody.innerHTML=''; tableContainer.style.display='none'; outputBox.style.display='none'; outputBox.textContent='';
         copyRow.style.display='none'; opticsCopyRow.style.display='none'; statsEl.style.display='none';
-        alertLostEl.style.display='none'; alertRejectedEl.style.display='none'; lostListEl.innerHTML=''; rejectedListEl.innerHTML=''; lastGrabbedRows=[];
+        alertLostEl.style.display='none'; alertRejectedEl.style.display='none'; alertMiddayEl.style.display='none';
+        lostListEl.innerHTML=''; rejectedListEl.innerHTML=''; middayInfoEl.innerHTML=''; lastGrabbedRows=[];
     }
 
     // === PROCESS SHEET ===
@@ -344,30 +433,47 @@
         const sheetName=sheetSelect.value; if(!sheetName){setStatus('Please select a sheet.','error');return;}
         setStatus('Processing...','info');
         try{
-            const sheet=workbook.Sheets[sheetName], rows=XLSX.utils.sheet_to_json(sheet,{defval:''});
+            const sheet=workbook.Sheets[sheetName];
+            const rows=XLSX.utils.sheet_to_json(sheet,{defval:''});
             if(!rows.length){setStatus('No data in sheet.','error');return;}
             const headers=Object.keys(rows[0]), colMap=findColumns(headers);
             if(!colMap.az){setStatus('Could not find "AZ" column.','error');return;}
             if(!colMap.site){setStatus('Could not find "Site" column.','error');return;}
             if(!colMap.position){setStatus('Could not find "Position" column.','error');return;}
-            let grabbed=[], lostRes=[], rejPos=[], skipAz=0, skipRt=0;
-            rows.forEach(row=>{
+
+            // Determine column count for fill scanning
+            const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1');
+            const colCount = range.e.c + 1;
+            const dataRowOffset = 1; // header is row 0
+
+            let grabbed=[], lostRes=[], rejPos=[], middayRows=[], skipAz=0, skipRt=0;
+            rows.forEach((row, rowIndex)=>{
                 const az=String(row[colMap.az]||'').trim(), site=String(row[colMap.site]||'').trim(), pos=String(row[colMap.position]||'').trim();
                 if(!az||!pos) return; if(!isTarget6az(az)){skipAz++;return;}
                 const rt=String(row[colMap.rackType]||'').trim(); if(rt&&!isValidRackType(rt)){skipRt++;return;}
                 const notes=String(row[colMap.notes]||'').trim(), nl=notes.toLowerCase();
                 const metroVal = colMap.metronomeLength ? String(row[colMap.metronomeLength]||'').trim() : '';
+
+                // v2.9.0: Detect midday fill (blue or green) on this row
+                const excelRow = rowIndex + dataRowOffset;
+                const middayColor = detectRowMidday(sheet, excelRow, colCount);
+                const isMidDay = middayColor !== null;
+
                 const entry={site,position:pos,uplinkConfig:String(row[colMap.uplinkConfig]||'').trim(),
                     asset:String(row[colMap.asset]||'').trim(),rackType:rt,landDate:formatDate(row[colMap.landDate]),
                     brick:String(row[colMap.brick]||'').trim(),notes,
-                    metronome: metroVal !== '' ? 'TRUE' : 'FALSE'};
+                    metronome: metroVal !== '' ? 'TRUE' : 'FALSE',
+                    midday: isMidDay,
+                    middayColor: middayColor}; // 'blue', 'green', or null
+
                 if(ALERT_LOST_RES.some(t=>nl.includes(t))){entry.status='lost';lostRes.push(entry);grabbed.push(entry);return;}
                 if(ALERT_REJECTED.some(t=>nl.includes(t))){entry.status='rejected';rejPos.push(entry);grabbed.push(entry);return;}
                 entry.status='ok'; grabbed.push(entry);
+                if(isMidDay) middayRows.push(entry);
             });
             grabbed=sortBySite(grabbed); lastGrabbedRows=grabbed;
-            displayResults(grabbed,lostRes,rejPos,skipAz,skipRt);
-        }catch(err){setStatus('Error processing: '+err.message,'error');}
+            displayResults(grabbed,lostRes,rejPos,middayRows,skipAz,skipRt);
+        }catch(err){setStatus('Error processing: '+err.message,'error');console.error('[6az] Process error:',err);}
     }
     function findColumns(headers){
         const m={az:null,site:null,position:null,uplinkConfig:null,asset:null,rackType:null,landDate:null,brick:null,notes:null,metronomeLength:null};
@@ -397,13 +503,18 @@
     function buildOpticsRowTSV(e){ return [e.site,e.position,e.uplinkConfig,e.asset,e.brick,e.landDate].join('\t'); }
     function buildEmptyOpticsRowTSV(){ return new Array(6).fill('').join('\t'); }
 
+    // v2.9.0: Cabling TSV — EXCLUDES midday (blue + green) rows
     function buildGroupedTSV(rows, includeAlerts){
-        const t=includeAlerts?rows:rows.filter(r=>r.status==='ok'); if(!t.length) return '';
+        const t = (includeAlerts ? rows : rows.filter(r=>r.status==='ok'))
+            .filter(r => !r.midday); // always exclude midday from cabling
+        if(!t.length) return '';
         const groups=groupBySite(t), parts=[];
         groups.forEach((g,i)=>{ g.rows.forEach(r=>parts.push(buildRowTSV(r)));
             if(i<groups.length-1) for(let j=0;j<SITE_GAP_ROWS;j++) parts.push(buildEmptyRowTSV()); });
         return parts.join('\n');
     }
+
+    // v2.9.0: Optics TSV — INCLUDES all rows (morning + midday blue + midday green)
     function buildOpticsTSV(rows){
         const clean=rows.filter(r=>r.status==='ok'); if(!clean.length) return '';
         const groups=groupBySite(clean), parts=[];
@@ -421,15 +532,35 @@
     }
     async function copyToClipboard(rows, includeAlerts){
         const tsv=buildGroupedTSV(rows,includeAlerts);
-        if(!tsv){copyStatus.textContent='No rows to copy.';setTimeout(()=>{copyStatus.textContent='';},3000);return false;}
+        if(!tsv){copyStatus.textContent='No cabling rows to copy (all may be midday).';setTimeout(()=>{copyStatus.textContent='';},3000);return false;}
         return writeToClipboard(tsv);
     }
 
     // === DISPLAY RESULTS ===
-    function displayResults(grabbed, lostRes, rejPos, skipAz, skipRt){
-        const cleanCount=grabbed.filter(r=>r.status==='ok').length, siteGroups=groupBySite(grabbed);
+    function displayResults(grabbed, lostRes, rejPos, middayRows, skipAz, skipRt){
+        const morningCount=grabbed.filter(r=>r.status==='ok'&&!r.midday).length;
+        const middayCount=middayRows.length;
+        const blueCount=middayRows.filter(r=>r.middayColor==='blue').length;
+        const greenCount=middayRows.filter(r=>r.middayColor==='green').length;
+        const cleanCount=grabbed.filter(r=>r.status==='ok').length;
+        const siteGroups=groupBySite(grabbed);
+
         statsEl.style.display='block';
-        statsEl.textContent=cleanCount+' positions grabbed | '+siteGroups.length+' sites | '+lostRes.length+' lost reservations | '+rejPos.length+' rejected | '+skipRt+' non-EC2/Bonsai/EBS skipped | '+skipAz+' non-6az skipped';
+        let middayLabel = middayCount+' midday';
+        if (blueCount>0 && greenCount>0) middayLabel += ' ('+blueCount+' blue, '+greenCount+' green)';
+        else if (blueCount>0) middayLabel += ' (blue)';
+        else if (greenCount>0) middayLabel += ' (green)';
+        statsEl.textContent=morningCount+' cabling + '+middayLabel+' optics-only | '+siteGroups.length+' sites | '+lostRes.length+' lost res | '+rejPos.length+' rejected | '+skipRt+' non-EC2/Bonsai/EBS skipped | '+skipAz+' non-6az skipped';
+
+        // Midday banner
+        if(middayCount>0){
+            alertMiddayEl.style.display='block';
+            const siteList = [...new Set(middayRows.map(r=>r.site))].join(', ');
+            const colorDesc = [];
+            if (blueCount>0) colorDesc.push(blueCount+' blue');
+            if (greenCount>0) colorDesc.push(greenCount+' green');
+            middayInfoEl.textContent=middayCount+' midday position'+(middayCount>1?'s':'')+' ('+colorDesc.join(' + ')+') detected across: '+siteList+'. Included in Optics copy, excluded from Cabling copy.';
+        }
 
         if(lostRes.length>0){ alertLostEl.style.display='block'; lostListEl.innerHTML='';
             lostRes.forEach(r=>{ const li=document.createElement('li'); li.textContent=r.site+' — '+r.position+' ('+r.rackType+', Asset: '+r.asset+', Brick: '+r.brick+')'; lostListEl.appendChild(li); }); }
@@ -438,6 +569,7 @@
         if(!grabbed.length){setStatus('No matching 6az EC2/Bonsai/EBS positions found.','info');return;}
 
         setStatus(grabbed.length+' total across '+siteGroups.length+' sites. '+
+            (middayCount>0?'🟢🔵 '+middayCount+' midday (optics only). ':'')+
             (lostRes.length>0?'⚠️ '+lostRes.length+' need re-reservation! ':'')+
             (rejPos.length>0?'🚫 '+rejPos.length+' rejected. ':''),
             lostRes.length>0||rejPos.length>0?'error':'success');
@@ -446,8 +578,16 @@
         siteGroups.forEach((group,gIdx)=>{
             group.rows.forEach(r=>{
                 const tr=document.createElement('tr');
-                if(r.status==='lost') tr.className='az6-row-lost'; else if(r.status==='rejected') tr.className='az6-row-rejected';
-                tr.innerHTML='<td>'+esc(r.site)+'</td><td>'+esc(r.position)+'</td><td>'+esc(r.uplinkConfig)+'</td><td>'+esc(r.asset)+'</td><td>'+esc(r.rackType)+'</td><td>'+esc(r.landDate)+'</td><td>'+esc(r.brick)+'</td><td>'+esc(r.notes)+'</td>';
+                if(r.status==='lost') tr.className='az6-row-lost';
+                else if(r.status==='rejected') tr.className='az6-row-rejected';
+                else if(r.midday) tr.className='az6-row-midday-'+(r.middayColor||'blue');
+                let middayTag = '';
+                if (r.midday) {
+                    const colorClass = r.middayColor==='green' ? 'az6-tag-midday-green' : 'az6-tag-midday-blue';
+                    const label = r.middayColor==='green' ? 'MIDDAY 🟢' : 'MIDDAY 🔵';
+                    middayTag = ' <span class="az6-tag-midday '+colorClass+'">'+label+'</span>';
+                }
+                tr.innerHTML='<td>'+esc(r.site)+middayTag+'</td><td>'+esc(r.position)+'</td><td>'+esc(r.uplinkConfig)+'</td><td>'+esc(r.asset)+'</td><td>'+esc(r.rackType)+'</td><td>'+esc(r.landDate)+'</td><td>'+esc(r.brick)+'</td><td>'+esc(r.notes)+'</td>';
                 resultsBody.appendChild(tr);
             });
             if(gIdx<siteGroups.length-1){ const d=document.createElement('tr'); d.className='az6-site-divider'; d.innerHTML='<td colspan="8"></td>'; resultsBody.appendChild(d); }
@@ -455,12 +595,17 @@
         tableContainer.style.display='block';
 
         const pLines=[], pGroups=siteGroups.slice(0,2);
-        pGroups.forEach((g,i)=>{ g.rows.slice(0,2).forEach(r=>pLines.push(buildRowTSV(r)));
+        pGroups.forEach((g,i)=>{ g.rows.slice(0,2).forEach(r=>{
+            const tag = r.midday ? ' [MIDDAY-'+(r.middayColor||'blue').toUpperCase()+']' : '';
+            pLines.push(buildRowTSV(r) + tag);
+        });
             if(g.rows.length>2) pLines.push('  ... +'+(g.rows.length-2)+' more from '+g.site);
             if(i<pGroups.length-1){pLines.push('');pLines.push('  ── 2-row gap ──');pLines.push('');} });
         if(siteGroups.length>2) pLines.push('\n... +'+(siteGroups.length-2)+' more site groups');
-        outputBox.textContent='19-col TSV (A-S) — Grouped by site, 2-row gaps:\n\n'+pLines.join('\n');
-        outputBox.style.display='block'; copyRow.style.display='flex';
+        outputBox.textContent='19-col TSV (A-S) — Cabling excludes midday, Optics includes all:\n\n'+pLines.join('\n');
+        outputBox.style.display='block';
+
+        if(morningCount>0) copyRow.style.display='flex';
         if(cleanCount>0) opticsCopyRow.style.display='flex';
     }
 
@@ -475,13 +620,13 @@
     copyBtn.addEventListener('click',async()=>{
         if(!lastGrabbedRows.length) return; copyStatus.textContent='Copying...';
         const ok=await copyToClipboard(lastGrabbedRows,false);
-        copyStatus.textContent=ok?'✓ Copied! Grouped by site with 2-row gaps. Paste into Col A.':'⚠ Copy may have failed — try Ctrl+V anyway.';
+        copyStatus.textContent=ok?'✓ Copied cabling (no midday)! Grouped by site with 2-row gaps. Paste into Col A.':'⚠ Copy may have failed — try Ctrl+V anyway.';
         setTimeout(()=>{copyStatus.textContent='';},4000);
     });
     copyAllBtn.addEventListener('click',async()=>{
         if(!lastGrabbedRows.length) return; copyStatus.textContent='Copying...';
         const ok=await copyToClipboard(lastGrabbedRows,true);
-        copyStatus.textContent=ok?'✓ Copied all (with alerts) — grouped, 2-row gaps. Paste into Col A.':'⚠ Copy may have failed — try Ctrl+V anyway.';
+        copyStatus.textContent=ok?'✓ Copied cabling with alerts (no midday) — grouped, 2-row gaps. Paste into Col A.':'⚠ Copy may have failed — try Ctrl+V anyway.';
         setTimeout(()=>{copyStatus.textContent='';},4000);
     });
     copyOpticsBtn.addEventListener('click',async()=>{
@@ -489,7 +634,7 @@
         const tsv=buildOpticsTSV(lastGrabbedRows);
         if(!tsv){opticsCopyStatus.textContent='No clean rows to copy.';setTimeout(()=>{opticsCopyStatus.textContent='';},3000);return;}
         const ok=await writeToClipboard(tsv);
-        opticsCopyStatus.textContent=ok?'✓ Optics copied! Paste into Col A of the optics workload.':'⚠ Copy may have failed — try Ctrl+V anyway.';
+        opticsCopyStatus.textContent=ok?'✓ Optics copied (morning + midday)! Paste into Col A of the optics workload.':'⚠ Copy may have failed — try Ctrl+V anyway.';
         setTimeout(()=>{opticsCopyStatus.textContent='';},4000);
     });
 
